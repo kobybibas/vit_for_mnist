@@ -41,7 +41,6 @@ class Net(nn.Module):
         x = self.pool(F.relu(self.conv2(x)))
         x = torch.flatten(x, 1)
         return self.fc1(x)
-        return x
 
 
 class EpochMetricsCallback(L.Callback):
