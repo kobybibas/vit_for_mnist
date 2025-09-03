@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any
 
 import lightning as L
+import pandas as pd
 import torch
 import torchvision
 from lightning.pytorch.loggers import CSVLogger
@@ -16,7 +17,8 @@ from torchvision.datasets.mnist import _Image_fromarray
 DEBUG = False
 NUM_IMG_PER_SEQ = 3
 NUM_WORKERS = 9
-MAX_EPOCHS = 20
+MAX_EPOCHS = 50
+LR_STEPS = [20, 30]
 
 
 class MNISTSequence(MNIST):
@@ -132,23 +134,25 @@ class TransformerModel(nn.Module):
 class EpochMetricsCallback(L.Callback):
     def on_validation_epoch_end(self, trainer, pl_module):
         # Train
-        train_loss_mean = -1
-        if len(pl_module.training_step_outputs) > 0:
-            train_loss_mean = torch.stack(pl_module.training_step_outputs).mean()
-            pl_module.log("training_epoch_mean", train_loss_mean)
+        train_loss_mean, train_acc_mean = -1, -1
+        if len(pl_module.training_step_loss_outputs) > 0:
+            train_loss_mean = torch.stack(pl_module.training_step_loss_outputs).mean()
+            train_acc_mean = torch.stack(
+                pl_module.training_step_accuracy_outputs
+            ).mean()
 
         # Val
-        val_loss_mean = torch.stack(pl_module.validation_step_outputs).mean()
-        pl_module.log("validation_epoch_mean", val_loss_mean)
+        val_loss_mean = torch.stack(pl_module.validation_step_loss_outputs).mean()
+        val_acc_mean = torch.stack(pl_module.validation_step_accuracy_outputs).mean()
 
         lr = trainer.optimizers[0].param_groups[0]["lr"]
 
         print(
-            f"[Epoch {trainer.current_epoch}] Validation [Loss]=[{val_loss_mean:.2f}] Training [Loss]=[{train_loss_mean:.2f}] lr={lr:.2e}"
+            f"[Epoch {trainer.current_epoch}] Validation [Loss Acc]=[{val_loss_mean:.2f} {val_acc_mean:.2f}] Training [Loss Acc]=[{train_loss_mean:.2f} {train_acc_mean:.2f}] lr={lr:.2e}"
         )
 
-        pl_module.training_step_outputs.clear()
-        pl_module.validation_step_outputs.clear()
+        pl_module.training_step_loss_outputs.clear()
+        pl_module.validation_step_loss_outputs.clear()
 
 
 class LitModel(L.LightningModule):
@@ -156,8 +160,14 @@ class LitModel(L.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.model = model
-        self.training_step_outputs = []
-        self.validation_step_outputs = []
+        self.training_step_loss_outputs = []
+        self.validation_step_loss_outputs = []
+        self.training_step_accuracy_outputs = []
+        self.validation_step_accuracy_outputs = []
+
+    def compute_accuracy(self, y, y_hat):
+        preds = y_hat.round()
+        return (preds == y).float().mean()
 
     def forward(self, x):
         y_hat = self.model(x)
@@ -167,19 +177,29 @@ class LitModel(L.LightningModule):
         x, y = batch
         y_hat = self.forward(x)
         loss = nn.functional.mse_loss(y_hat, y.float())
-        self.training_step_outputs.append(loss)
+        accuracy = self.compute_accuracy(y, y_hat)
+        self.log("train_loss", loss, on_step=False, on_epoch=True)
+        self.log("train_accuracy", accuracy, on_step=False, on_epoch=True)
+        self.training_step_loss_outputs.append(loss)
+        self.training_step_accuracy_outputs.append(accuracy)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self.forward(x)
         loss = nn.functional.mse_loss(y_hat, y.float())
-        self.validation_step_outputs.append(loss)
+        accuracy = self.compute_accuracy(y, y_hat)
+        self.log("val_loss", loss, on_step=False, on_epoch=True)
+        self.log("val_accuracy", accuracy, on_step=False, on_epoch=True)
+        self.validation_step_loss_outputs.append(loss)
+        self.validation_step_accuracy_outputs.append(accuracy)
         return loss
 
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-5)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=LR_STEPS, gamma=0.1
+        )
         return {
             "optimizer": optimizer,
             "lr_scheduler": scheduler,
@@ -249,6 +269,8 @@ def main():
         limit_train_batches=1 if DEBUG else None,
         limit_val_batches=1 if DEBUG else None,
         limit_test_batches=1 if DEBUG else None,
+        # Visualize a single batch
+        limit_predict_batches=1,
     )
 
     print("Training model...")
@@ -258,15 +280,76 @@ def main():
         val_dataloaders=val_loader,
     )
 
-    print("Testing model...")
-    trainer = L.Trainer(
-        logger=logger,
-        # Visualize a single batch
-        limit_train_batches=1 if DEBUG else None,
-        limit_val_batches=1 if DEBUG else None,
-        limit_test_batches=1 if DEBUG else None,
-    )
+    print("Predicting model...")
     trainer.predict(lit_model, dataloaders=val_loader)
+
+    # ----------------------------- #
+    # Visualize metrics over epochs #
+    # ----------------------------- #
+    out_dir = logger.log_dir
+    log_df = pd.read_csv(osp.join(out_dir, "metrics.csv"))
+
+    # Plot training loss (skip NaN values)
+    train_data = log_df.dropna(subset=["train_loss"])
+    val_data = log_df.dropna(subset=["val_loss"])
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    if len(train_data) > 0:
+        ax.plot(
+            train_data["epoch"],
+            train_data["train_loss"],
+            label="Training Loss",
+            marker="o",
+        )
+
+    # Plot validation loss (skip NaN values)
+    if len(val_data) > 0:
+        ax.plot(
+            val_data["epoch"], val_data["val_loss"], label="Validation Loss", marker="s"
+        )
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("Loss over Epochs")
+    ax.legend()
+    ax.grid(True)
+    ax.set_yscale("log")
+    ax.set_xlim(0, log_df["epoch"].max() + 1)
+    plt.tight_layout()
+    plt.savefig(osp.join(out_dir, "loss_over_epochs.png"))
+    plt.close(fig)
+
+    # Accuracy
+    train_data = log_df.dropna(subset=["train_accuracy"])
+    val_data = log_df.dropna(subset=["val_accuracy"])
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+
+    # Plot training accuracy (skip NaN values)
+    if len(train_data) > 0:
+        ax.plot(
+            train_data["epoch"],
+            train_data["train_accuracy"],
+            label="Training Accuracy",
+            marker="o",
+        )
+
+    # Plot validation accuracy (skip NaN values)
+    if len(val_data) > 0:
+        ax.plot(
+            val_data["epoch"],
+            val_data["val_accuracy"],
+            label="Validation Accuracy",
+            marker="s",
+        )
+
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Accuracy")
+    ax.set_title("Accuracy over Epochs")
+    ax.legend()
+    ax.grid(True)
+    ax.set_xlim(0, log_df["epoch"].max() + 1)
+    ax.set_ylim(0, 1)
+    plt.tight_layout()
+    plt.savefig(osp.join(out_dir, "accuracy_over_epochs.png"))
+    plt.close(fig)
 
 
 if __name__ == "__main__":
