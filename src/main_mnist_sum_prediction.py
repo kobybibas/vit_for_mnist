@@ -1,8 +1,11 @@
+import os.path as osp
+from datetime import datetime
 from typing import Any
 
 import lightning as L
 import torch
 import torchvision
+from lightning.pytorch.loggers import CSVLogger
 from matplotlib import pyplot as plt
 from torch import nn, optim
 from torch.nn import functional as F
@@ -10,10 +13,10 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
 from torchvision.datasets.mnist import _Image_fromarray
 
-DEBUG = True
+DEBUG = False
 NUM_IMG_PER_SEQ = 3
 NUM_WORKERS = 9
-MAX_EPOCHS = 20 if DEBUG is False else 1
+MAX_EPOCHS = 20
 
 
 class MNISTSequence(MNIST):
@@ -151,22 +154,25 @@ class EpochMetricsCallback(L.Callback):
 class LitModel(L.LightningModule):
     def __init__(self, model):
         super().__init__()
+        self.save_hyperparameters()
         self.model = model
         self.training_step_outputs = []
         self.validation_step_outputs = []
 
+    def forward(self, x):
+        y_hat = self.model(x)
+        return y_hat.float().squeeze()
+
     def training_step(self, batch, batch_idx):
         x, y = batch
-        y_hat = self.model(x)
-        y_hat = y_hat.float().squeeze()
+        y_hat = self.forward(x)
         loss = nn.functional.mse_loss(y_hat, y.float())
         self.training_step_outputs.append(loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        y_hat = self.model(x)
-        y_hat = y_hat.float().squeeze()
+        y_hat = self.forward(x)
         loss = nn.functional.mse_loss(y_hat, y.float())
         self.validation_step_outputs.append(loss)
         return loss
@@ -179,36 +185,39 @@ class LitModel(L.LightningModule):
             "lr_scheduler": scheduler,
         }
 
-    # def predict_step(self, batch, batch_idx, dataloader_idx=0):
-    #     imgs, labels = batch  # imgs: [B, seq_len, 1, 28, 28], labels: [B]
-    #     preds = self(batch).argmax(dim=-1)  # [B]
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        x, y = batch
+        y_hat = self(x)
 
-    #     batch_size = imgs.size(0)
+        out_dir = self.logger.log_dir
+        print(f"Logging to: {out_dir}")
+        imgs = x  # (B, NUM_IMG_PER_SEQ, 1, 28, 28)
 
-    #     fig, axes = plt.subplots(batch_size, 1, figsize=(12, 2 * batch_size))
+        batch_size = imgs.size(0)
 
-    #     if batch_size == 1:
-    #         axes = [axes]  # keep iterable
+        fig, axes = plt.subplots(batch_size, 1, figsize=(12, 2 * batch_size))
 
-    #     for i in range(batch_size):
-    #         seq_imgs = imgs[i]  # [seq_len, 1, 28, 28]
+        if batch_size == 1:
+            axes = [axes]  # keep iterable
 
-    #         grid = torchvision.utils.make_grid(
-    #             seq_imgs.cpu(), nrow=seq_imgs.size(0)
-    #         )
-    #         axes[i].imshow(grid.permute(1, 2, 0) * 0.5 + 0.5)
-    #         axes[i].set_title(f"Pred: {preds[i].item()} | Label: {labels[i].item()}")
-    #         axes[i].axis("off")
+        for i in range(batch_size):
+            seq_imgs = imgs[i]  # [seq_len, 1, 28, 28]
 
-    #     plt.tight_layout()
-    #     plt.show()
+            grid = torchvision.utils.make_grid(seq_imgs.cpu(), nrow=seq_imgs.size(0))
+            axes[i].imshow(grid.permute(1, 2, 0) * 0.5 + 0.5)
+            axes[i].set_title(f"Pred: {y_hat[i].item():.2f} | Label: {y[i].item()}")
+            axes[i].axis("off")
 
-    #     return preds
+        plt.tight_layout()
+        plt.savefig(osp.join(out_dir, f"predictions_{batch_idx}.png"))
+        plt.close(fig)
 
+        return y_hat
 
 
 def main():
-    # Dataset
+    now = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger = CSVLogger("logs", name=now)
     train_set, val_set = data_preparation()
     train_loader = DataLoader(
         train_set,
@@ -232,18 +241,32 @@ def main():
     # Train
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     trainer = L.Trainer(
-        max_epochs=MAX_EPOCHS,
+        max_epochs=1 if DEBUG else MAX_EPOCHS,
         accelerator=device,
         callbacks=[EpochMetricsCallback()],
+        logger=logger,
+        # Fast dev mode
+        limit_train_batches=1 if DEBUG else None,
+        limit_val_batches=1 if DEBUG else None,
+        limit_test_batches=1 if DEBUG else None,
     )
 
     print("Training model...")
     trainer.fit(
-        model=lit_model, train_dataloaders=train_loader, val_dataloaders=val_loader
+        model=lit_model,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
     )
 
-    print("Testing model...") # Todo, move to the end
-    predictions = trainer.predict(lit_model, val_loader)
+    print("Testing model...")
+    trainer = L.Trainer(
+        logger=logger,
+        # Visualize a single batch
+        limit_train_batches=1 if DEBUG else None,
+        limit_val_batches=1 if DEBUG else None,
+        limit_test_batches=1 if DEBUG else None,
+    )
+    trainer.predict(lit_model, dataloaders=val_loader)
 
 
 if __name__ == "__main__":

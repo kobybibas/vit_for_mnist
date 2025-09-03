@@ -16,6 +16,7 @@ results/
 *.xml
 lightning_logs/
 *.ckpt
+logs/
 
 # C extensions
 *.so
