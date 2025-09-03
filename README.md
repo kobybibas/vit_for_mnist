@@ -8,10 +8,12 @@ It contains the following
 # TODOs
 Self attention:
 - [x] Visualizations of the sequence, ground truth and prediction
-- [ ] Add loss vs epoch figure
-- [ ] Add accuracy metric (if round(output)=GT)
-- [ ] Sequence of varying length 
+- [x] Add loss vs epoch figure
+- [x] Add accuracy metric (if round(output)=GT)
+- [ ] Sequence of varying length (1-10)
 - [ ] Compare to traditional model (CNN + fc)
+- [ ] Add output transformation for output to be between -1 and 1: (y_hat + 0.5) * y_max
+- [ ] Histogram of error residual 
 
 Cross attention:
 - [ ] Baseline
