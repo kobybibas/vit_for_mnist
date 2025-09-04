@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
 from torchvision.datasets.mnist import _Image_fromarray
 
-DEBUG = True
+DEBUG = False
 MAX_IMG_PER_SEQ = 10
 NUM_WORKERS = 9
 MAX_EPOCHS = 30
