@@ -1,3 +1,4 @@
+import binascii
 import os.path as osp
 from datetime import datetime
 from typing import Any
@@ -14,17 +15,20 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
 from torchvision.datasets.mnist import _Image_fromarray
 
-DEBUG = False
-NUM_IMG_PER_SEQ = 3
+DEBUG = True
+MAX_IMG_PER_SEQ = 10
 NUM_WORKERS = 9
-MAX_EPOCHS = 50
-LR_STEPS = [20, 30]
+MAX_EPOCHS = 30
+LR_STEPS = [20, 28]
 
 
 class MNISTSequence(MNIST):
     def __getitem__(self, index: int) -> tuple[Any, Any]:
+        # Deterministically set the sequence length
+        seq_length = binascii.crc32(str(index).encode()) % MAX_IMG_PER_SEQ + 1
+
         start = index
-        end = start + NUM_IMG_PER_SEQ
+        end = start + seq_length
 
         imgs, target = self.data[start:end], self.targets[start:end].sum().item()
 
@@ -36,7 +40,7 @@ class MNISTSequence(MNIST):
                 img = self.transform(img)
 
             img_seq.append(img)
-        img_seq = torch.stack(img_seq, dim=0)  # (NUM_IMG_PER_SEQ, 1, 28, 28)
+        img_seq = torch.stack(img_seq, dim=0)  # (IMG_PER_SEQ, 1, 28, 28)
 
         if self.target_transform is not None:
             target = self.target_transform(target)
@@ -44,8 +48,39 @@ class MNISTSequence(MNIST):
         return img_seq, target
 
     def __len__(self) -> int:
-        # ensure every index has NUM_IMG_PER_SEQ images available
-        return len(self.data) - (NUM_IMG_PER_SEQ - 1)
+        return len(self.data) - (MAX_IMG_PER_SEQ - 1)
+
+
+def collate_fn(batch):
+    # Pad sequences to max length in batch, use attention masks
+    sequences, labels = zip(*batch)
+    max_len = max(len(seq) for seq in sequences)
+
+    padded_seqs = []
+    attention_masks = []
+
+    pad_value = 0
+    for seq in sequences:
+        padded = F.pad(
+            seq,
+            (
+                pad_value,
+                pad_value,
+                pad_value,
+                pad_value,
+                pad_value,
+                pad_value,
+                pad_value,
+                max_len - len(seq),
+            ),
+        )
+        mask = torch.ones(len(seq), dtype=torch.bool)
+        mask = F.pad(mask, (0, max_len - len(seq)), value=False)
+
+        padded_seqs.append(padded)
+        attention_masks.append(mask)
+
+    return torch.stack(padded_seqs), torch.stack(attention_masks), torch.tensor(labels)
 
 
 def data_preparation():
@@ -96,14 +131,19 @@ class TransformerModel(nn.Module):
         # Take sequence -> encoder of each image -> self attention -> relu
         self.encoder = ImageEncoder()
 
-        self.self_attention = nn.MultiheadAttention(
-            embed_dim=128, num_heads=4, dropout=0.0, batch_first=True
+        self.embed_dim = 128
+        self.self_attention = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                self.embed_dim, nhead=4, dropout=0.0, batch_first=True
+            ),
+            1,
         )
-        self.fc1 = nn.Linear(128, 64)
+
+        self.fc1 = nn.Linear(self.embed_dim, 64)
         self.fc2 = nn.Linear(64, 1)
 
-    def forward(self, x_seq):
-        # Reshape to have a virtual larger batch, (B * NUM_IMG_PER_SEQ, C, H, W) then reshape again to feed the transformer
+    def forward(self, x_seq, attention_mask):
+        # Reshape to have a virtual larger batch, (B * IMG_PER_SEQ, C, H, W) then reshape again to feed the transformer
         batch, seq, channel, height, width = x_seq.shape
         if DEBUG:
             print(f"1. {x_seq.shape=}")
@@ -113,13 +153,17 @@ class TransformerModel(nn.Module):
         z = self.encoder(x)
         if DEBUG:
             print(f"3. {z.shape=}")
-        z = z.view(batch, seq, 128)
+        z = z.view(batch, seq, self.embed_dim)
         if DEBUG:
             print(f"4. {z.shape=}")
-        z, _ = self.self_attention(z, z, z)
+        z = self.self_attention(
+            z  # , src_key_padding_mask=~attention_mask TODO: we pad with 0, assuming the model pick up that these are fake images.
+        )  # Invert mask for transformer (True = ignore)
         if DEBUG:
-            print(f"5. {z.shape=}")
-        z = z.mean(dim=1)
+            print(f"5. {z.shape=}, {attention_mask.shape=} {attention_mask=}")
+
+        masked_encoded = z * attention_mask.unsqueeze(-1)
+        z = masked_encoded.sum(dim=1) / attention_mask.sum(dim=1, keepdim=True)
         if DEBUG:
             print(f"6. {z.shape=}")
         z = F.relu(self.fc1(z))
@@ -150,7 +194,11 @@ class EpochMetricsCallback(L.Callback):
         print(
             f"[Epoch {trainer.current_epoch}] Validation [Loss Acc]=[{val_loss_mean:.2f} {val_acc_mean:.2f}] Training [Loss Acc]=[{train_loss_mean:.2f} {train_acc_mean:.2f}] lr={lr:.2e}"
         )
-
+        self.log("val_loss", val_loss_mean, on_step=False, on_epoch=True)
+        self.log("val_accuracy", val_acc_mean, on_step=False, on_epoch=True)
+        self.log("train_loss", train_loss_mean, on_step=False, on_epoch=True)
+        self.log("train_accuracy", train_acc_mean, on_step=False, on_epoch=True)
+        self.log("lr", lr, on_step=False, on_epoch=True)
         pl_module.training_step_loss_outputs.clear()
         pl_module.validation_step_loss_outputs.clear()
 
@@ -169,28 +217,43 @@ class LitModel(L.LightningModule):
         preds = y_hat.round()
         return (preds == y).float().mean()
 
-    def forward(self, x):
-        y_hat = self.model(x)
+    def get_random_seq_length(self, attention_mask):
+        num_elements = len(attention_mask)
+        random_index = torch.randint(0, num_elements, (1,))
+        random_mask = attention_mask[random_index]
+        random_seq_length = random_mask.sum(dim=1).item()
+        return random_seq_length
+
+    def forward(self, x, attention_mask):
+        y_hat = self.model(x, attention_mask)
         return y_hat.float().squeeze()
 
     def training_step(self, batch, batch_idx):
-        x, y = batch
-        y_hat = self.forward(x)
+        x, attention_mask, y = batch
+        y_hat = self.forward(x, attention_mask)
         loss = nn.functional.mse_loss(y_hat, y.float())
         accuracy = self.compute_accuracy(y, y_hat)
-        self.log("train_loss", loss, on_step=False, on_epoch=True)
-        self.log("train_accuracy", accuracy, on_step=False, on_epoch=True)
+        self.log(
+            "train_random_seq_length",
+            self.get_random_seq_length(attention_mask),
+            on_step=True,
+            on_epoch=False,
+        )
         self.training_step_loss_outputs.append(loss)
         self.training_step_accuracy_outputs.append(accuracy)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, y = batch
-        y_hat = self.forward(x)
+        x, attention_mask, y = batch
+        y_hat = self.forward(x, attention_mask)
         loss = nn.functional.mse_loss(y_hat, y.float())
         accuracy = self.compute_accuracy(y, y_hat)
-        self.log("val_loss", loss, on_step=False, on_epoch=True)
-        self.log("val_accuracy", accuracy, on_step=False, on_epoch=True)
+        self.log(
+            "val_random_seq_length",
+            self.get_random_seq_length(attention_mask),
+            on_step=True,
+            on_epoch=False,
+        )
         self.validation_step_loss_outputs.append(loss)
         self.validation_step_accuracy_outputs.append(accuracy)
         return loss
@@ -206,12 +269,12 @@ class LitModel(L.LightningModule):
         }
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        x, y = batch
-        y_hat = self(x)
+        x, attention_mask, y = batch
+        y_hat = self(x, attention_mask)
 
         out_dir = self.logger.log_dir
         print(f"Logging to: {out_dir}")
-        imgs = x  # (B, NUM_IMG_PER_SEQ, 1, 28, 28)
+        imgs = x  # (B, IMG_PER_SEQ, 1, 28, 28)
 
         batch_size = imgs.size(0)
 
@@ -245,6 +308,7 @@ def main():
         shuffle=True,
         num_workers=NUM_WORKERS,
         persistent_workers=True,
+        collate_fn=collate_fn,
     )
     val_loader = DataLoader(
         val_set,
@@ -252,6 +316,7 @@ def main():
         shuffle=False,
         num_workers=NUM_WORKERS,
         persistent_workers=True,
+        collate_fn=collate_fn,
     )
 
     # Initiate model
@@ -266,9 +331,9 @@ def main():
         callbacks=[EpochMetricsCallback()],
         logger=logger,
         # Fast dev mode
-        limit_train_batches=1 if DEBUG else None,
-        limit_val_batches=1 if DEBUG else None,
-        limit_test_batches=1 if DEBUG else None,
+        limit_train_batches=100 if DEBUG else None,
+        limit_val_batches=10 if DEBUG else None,
+        limit_test_batches=10 if DEBUG else None,
         # Visualize a single batch
         limit_predict_batches=1,
     )
@@ -349,6 +414,21 @@ def main():
     ax.set_ylim(0, 1)
     plt.tight_layout()
     plt.savefig(osp.join(out_dir, "accuracy_over_epochs.png"))
+    plt.close(fig)
+
+    # Plot histogram of sequence length
+    train_data = log_df.dropna(subset=["train_random_seq_length"])
+    val_data = log_df.dropna(subset=["val_random_seq_length"])
+    bins = MAX_IMG_PER_SEQ
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    ax.hist(train_data["train_random_seq_length"], bins=bins, alpha=0.7, label="Train")
+    ax.hist(val_data["val_random_seq_length"], bins=bins, alpha=0.7, label="Validation")
+    ax.set_xlabel("Sequence Length")
+    ax.set_ylabel("Frequency")
+    ax.set_title("Histogram of Sequence Lengths")
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(osp.join(out_dir, "histogram_sequence_length.png"))
     plt.close(fig)
 
 
