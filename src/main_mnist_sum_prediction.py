@@ -21,6 +21,8 @@ NUM_WORKERS = 9
 MAX_EPOCHS = 50
 LR_STEPS = [30, 40]
 
+MODEL_TYPE = 'Transformer' # 'Transformer' or 'FC'
+
 # Transform the model output to [0, 90]
 OUTPUT_NORMALIZATION = True
 
@@ -182,6 +184,39 @@ class TransformerModel(nn.Module):
             z = F.relu(z)
         return z
 
+class FullyConnectedModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed_dim = 128
+        self.encoder = ImageEncoder(self.embed_dim)
+        self.fc1 = nn.Linear(128*MAX_IMG_PER_SEQ, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 1)
+
+    def forward(self, x):
+        # Reshape to have a virtual larger batch, (B * IMG_PER_SEQ, C, H, W)
+        batch, seq, channel, height, width = x.shape
+        if DEBUG:
+            print(f"1. {x.shape=}")
+        x = x.view(batch * seq, channel, height, width)
+        if DEBUG:
+            print(f"2. {x.shape=}")
+        z = self.encoder(x)
+        if DEBUG:
+            print(f"3. {z.shape=}")
+        z = z.view(batch, seq, self.embed_dim)
+        x = x.view(x.size(0), -1)  # Flatten the input
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+
+        if OUTPUT_NORMALIZATION:
+            # Equivalent to [(y/90)-0.5]
+            x = (x + 0.5) * 90
+        else:
+            x = F.relu(x)
+        return x
+
 
 class EpochMetricsCallback(L.Callback):
     def on_validation_epoch_end(self, trainer, pl_module):
@@ -308,7 +343,10 @@ class LitModel(L.LightningModule):
 
 def main():
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
-    logger = CSVLogger("logs", name=now)
+    run_name = now + '_' + MODEL_TYPE
+    run_name = run_name + '_DEBUG' if DEBUG else run_name
+    logger = CSVLogger("logs", name=run_name)
+    
     train_set, val_set = data_preparation()
     train_loader = DataLoader(
         train_set,

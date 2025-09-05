@@ -26,3 +26,4 @@ Cross attention:
 Self attention: 
  - Baseline: Validation [Loss Acc]=[1.40 0.53] Training [Loss Acc]=[0.48 0.57]
  - With output normalization scaling: 
+ - CNN + FC:
