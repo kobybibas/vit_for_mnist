@@ -18,18 +18,22 @@ from torchvision.datasets.mnist import _Image_fromarray
 DEBUG = False
 MAX_IMG_PER_SEQ = 10
 NUM_WORKERS = 9
-MAX_EPOCHS = 30
-LR_STEPS = [20, 28]
+MAX_EPOCHS = 50
+LR_STEPS = [30, 40]
+
+# Transform the model output to [0, 90]
+OUTPUT_NORMALIZATION = True
 
 
 class MNISTSequence(MNIST):
-    def __getitem__(self, index: int) -> tuple[Any, Any]:
+
+    def get_sequence_length(self,index):
         # Deterministically set the sequence length
-        seq_length = binascii.crc32(str(index).encode()) % MAX_IMG_PER_SEQ + 1
+        return binascii.crc32(str(index).encode()) % MAX_IMG_PER_SEQ + 1
 
+    def __getitem__(self, index: int) -> tuple[Any, Any]:
         start = index
-        end = start + seq_length
-
+        end = start + self.get_sequence_length(index)
         imgs, target = self.data[start:end], self.targets[start:end].sum().item()
 
         img_seq = []
@@ -40,6 +44,7 @@ class MNISTSequence(MNIST):
                 img = self.transform(img)
 
             img_seq.append(img)
+
         img_seq = torch.stack(img_seq, dim=0)  # (IMG_PER_SEQ, 1, 28, 28)
 
         if self.target_transform is not None:
@@ -51,8 +56,7 @@ class MNISTSequence(MNIST):
         return len(self.data) - (MAX_IMG_PER_SEQ - 1)
 
 
-def collate_fn(batch):
-    # Pad sequences to max length in batch, use attention masks
+def pad_sequences(batch):
     sequences, labels = zip(*batch)
     max_len = max(len(seq) for seq in sequences)
 
@@ -104,17 +108,16 @@ def data_preparation():
     val_set = MNISTSequence(
         root="data", train=False, download=True, transform=val_transform
     )
-
     return train_set, val_set
 
 
 class ImageEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, output_embed_dim):
         super().__init__()
         self.conv1 = nn.Conv2d(1, 6, 5)
         self.pool = nn.MaxPool2d(2, 2)
         self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(1024, 128)
+        self.fc1 = nn.Linear(1024, output_embed_dim)
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
@@ -128,10 +131,8 @@ class ImageEncoder(nn.Module):
 class TransformerModel(nn.Module):
     def __init__(self):
         super().__init__()
-        # Take sequence -> encoder of each image -> self attention -> relu
-        self.encoder = ImageEncoder()
-
         self.embed_dim = 128
+        self.encoder = ImageEncoder(self.embed_dim)
         self.self_attention = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 self.embed_dim, nhead=4, dropout=0.0, batch_first=True
@@ -157,11 +158,12 @@ class TransformerModel(nn.Module):
         if DEBUG:
             print(f"4. {z.shape=}")
         z = self.self_attention(
-            z  # , src_key_padding_mask=~attention_mask TODO: we pad with 0, assuming the model pick up that these are fake images.
-        )  # Invert mask for transformer (True = ignore)
+            z  # We pad with 0 instead of src_key_padding_mask=~attention_mask assuming the model pick up that these are fake images
+        )
         if DEBUG:
             print(f"5. {z.shape=}, {attention_mask.shape=} {attention_mask=}")
 
+        # TODO: should we remove masked encoded? 
         masked_encoded = z * attention_mask.unsqueeze(-1)
         z = masked_encoded.sum(dim=1) / attention_mask.sum(dim=1, keepdim=True)
         if DEBUG:
@@ -169,9 +171,15 @@ class TransformerModel(nn.Module):
         z = F.relu(self.fc1(z))
         if DEBUG:
             print(f"7. {z.shape=}")
-        z = F.relu(self.fc2(z))
+        z = self.fc2(z)
         if DEBUG:
             print(f"8. {z.shape=}")
+
+        if OUTPUT_NORMALIZATION:
+            # Equivalent to [(y/90)-0.5]
+            z = (z + 0.5) * 90
+        else:
+            z = F.relu(z)
         return z
 
 
@@ -308,7 +316,7 @@ def main():
         shuffle=True,
         num_workers=NUM_WORKERS,
         persistent_workers=True,
-        collate_fn=collate_fn,
+        collate_fn=pad_sequences,
     )
     val_loader = DataLoader(
         val_set,
@@ -316,7 +324,7 @@ def main():
         shuffle=False,
         num_workers=NUM_WORKERS,
         persistent_workers=True,
-        collate_fn=collate_fn,
+        collate_fn=pad_sequences,
     )
 
     # Initiate model
@@ -420,13 +428,17 @@ def main():
     train_data = log_df.dropna(subset=["train_random_seq_length"])
     val_data = log_df.dropna(subset=["val_random_seq_length"])
     bins = MAX_IMG_PER_SEQ
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    fig, axs = plt.subplots(2, 1, figsize=(10, 6))
+    ax = axs[0]
     ax.hist(train_data["train_random_seq_length"], bins=bins, alpha=0.7, label="Train")
+    ax.set_ylabel("Frequency")
+    
+    ax = axs[1]
     ax.hist(val_data["val_random_seq_length"], bins=bins, alpha=0.7, label="Validation")
     ax.set_xlabel("Sequence Length")
     ax.set_ylabel("Frequency")
-    ax.set_title("Histogram of Sequence Lengths")
-    ax.legend()
+    
+    axs[0].set_title("Histogram of Sequence Lengths")
     plt.tight_layout()
     plt.savefig(osp.join(out_dir, "histogram_sequence_length.png"))
     plt.close(fig)
