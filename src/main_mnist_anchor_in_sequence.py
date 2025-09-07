@@ -1,5 +1,3 @@
-# TODO: Transform this file to classification task of whether an anchor image is present in the sequence
-
 import binascii
 import os.path as osp
 from datetime import datetime
@@ -19,7 +17,6 @@ from torchvision.datasets import MNIST
 from torchvision.datasets.mnist import _Image_fromarray
 
 DEBUG = False
-MIN_IMG_PER_SEQ = 1
 MAX_IMG_PER_SEQ = 10
 NUM_WORKERS = 9
 MAX_EPOCHS = 50
@@ -36,7 +33,7 @@ class MNISTSequence(MNIST):
     def __getitem__(self, index: int) -> tuple[Any, Any]:
         start = index
         end = start + self.get_sequence_length(index) + 1  # +1 for anchor image
-        imgs, target = self.data[start:end], self.targets[start:end].sum().item()
+        imgs, targets = self.data[start:end], self.targets[start:end]
 
         img_seq = []
         for img in imgs:
@@ -50,11 +47,16 @@ class MNISTSequence(MNIST):
         img_seq = torch.stack(img_seq, dim=0)  # (IMG_PER_SEQ, 1, 28, 28)
 
         if self.target_transform is not None:
-            target = self.target_transform(target)
+            for i in range(len(targets)):
+                targets[i] = self.target_transform(targets[i])
 
-        img_anchor = img_seq[0].unsqueeze(0)  # (1, 1, 28, 28)
+        img_anchor = img_seq[0]  # (1, 28, 28)
         img_seq = img_seq[1:]  # (IMG_PER_SEQ , 1, 28, 28)
-        return img_anchor, img_seq, target
+
+        target_anchor = targets[0]
+        target_seq = targets[1:]
+        label = target_anchor in target_seq
+        return img_anchor, img_seq, label
 
     def __len__(self) -> int:
         return len(self.data) - MAX_IMG_PER_SEQ - 1
@@ -95,7 +97,7 @@ def pad_sequences(batch):
         attention_masks.append(mask)
 
     return (
-        anchors,
+        torch.stack(anchors),
         torch.stack(padded_seqs),
         torch.stack(attention_masks),
         torch.tensor(labels),
@@ -148,18 +150,19 @@ class TransformerModel(nn.Module):
         super().__init__()
         self.embed_dim = 128
         self.encoder = ImageEncoder(self.embed_dim)
-        self.self_attention = nn.TransformerEncoder(  # TODO: convert to cross attention
-            nn.TransformerEncoderLayer(
-                self.embed_dim, nhead=4, dropout=0.0, batch_first=True
-            ),
-            1,
+        self.cross_attention = nn.MultiheadAttention(
+            self.embed_dim, num_heads=4, batch_first=True
         )
 
         self.fc1 = nn.Linear(self.embed_dim, 64)
         self.fc2 = nn.Linear(64, 1)
 
     def forward(self, x_anchor, x_seq, attention_mask):
+        if DEBUG:
+            print(f"1. {x_anchor.shape=} {x_seq.shape=} {attention_mask.shape=}")
         z_anchor = self.encoder(x_anchor)
+        if DEBUG:
+            print(f"1. {z_anchor.shape=}")
 
         # Reshape to have a virtual larger batch, (B * IMG_PER_SEQ, C, H, W) then reshape again to feed the transformer
         batch, seq, channel, height, width = x_seq.shape
@@ -175,23 +178,25 @@ class TransformerModel(nn.Module):
         z = z.view(batch, seq, self.embed_dim)
         if DEBUG:
             print(f"4. {z.shape=}")
-        z = self.self_attention(
-            z  # We pad with 0 instead of src_key_padding_mask=~attention_mask assuming the model pick up that these are fake images
+        y, _ = self.cross_attention(
+            z_anchor.unsqueeze(1),
+            z,
+            z,  # Query, Key, Value. We pad with 0 instead of src_key_padding_mask=~attention_mask assuming the model pick up that these are fake images
         )
         if DEBUG:
-            print(f"5. {z.shape=}, {attention_mask.shape=} {attention_mask=}")
+            print(f"5. {y.shape=}")
 
-        z = z.mean(dim=1)
+        y = y.mean(dim=1)
         if DEBUG:
-            print(f"6. {z.shape=}")
-        z = F.relu(self.fc1(z))
+            print(f"6. {y.shape=}")
+        y = F.relu(self.fc1(y))
         if DEBUG:
-            print(f"7. {z.shape=}")
-        z = self.fc2(z)
+            print(f"7. {y.shape=}")
+        y = self.fc2(y)
         if DEBUG:
-            print(f"8. {z.shape=}")
-        z = F.relu(z)
-        return z
+            print(f"8. {y.shape=}")
+        y = F.relu(y)
+        return y
 
 
 class FullyConnectedModel(nn.Module):
@@ -199,17 +204,19 @@ class FullyConnectedModel(nn.Module):
         super().__init__()
         self.embed_dim = 128
         self.encoder = ImageEncoder(self.embed_dim)
-        self.fc1 = nn.Linear(128 * MAX_IMG_PER_SEQ, 128)
+        self.fc1 = nn.Linear(self.embed_dim * MAX_IMG_PER_SEQ + self.embed_dim, 128)
         self.fc2 = nn.Linear(128, 64)
         self.fc3 = nn.Linear(64, 1)
 
-    def forward(self, x, attention_mask):
+    def forward(self, x_anchor, x_seq, attention_mask):
+        z_anchor = self.encoder(x_anchor)
+
         # attention_mask is not used, it is to be compatible with Transformer inputs
         # Reshape to have a virtual larger batch, (B * IMG_PER_SEQ, C, H, W)
-        batch, seq, channel, height, width = x.shape
+        batch, seq, channel, height, width = x_seq.shape
         if DEBUG:
-            print(f"1. {x.shape=}")
-        x = x.view(batch * seq, channel, height, width)
+            print(f"1. {x_seq.shape=}")
+        x = x_seq.view(batch * seq, channel, height, width)
         if DEBUG:
             print(f"2. {x.shape=}")
         z = self.encoder(x)
@@ -221,6 +228,9 @@ class FullyConnectedModel(nn.Module):
         z = z.view(batch, -1)  # Flatten the input
         if DEBUG:
             print(f"5. {z.shape=}")
+        z = torch.cat((z_anchor, z), dim=1)
+        if DEBUG:
+            print(f"6. {z.shape=}")
         z = F.relu(self.fc1(z))
         z = F.relu(self.fc2(z))
         z = self.fc3(z)
@@ -274,13 +284,13 @@ class LitModel(L.LightningModule):
         random_seq_length = random_mask.sum(dim=1).item()
         return random_seq_length
 
-    def forward(self, x, attention_mask):
-        y_hat = self.model(x, attention_mask)
+    def forward(self, x_anchor, x_seq, attention_mask):
+        y_hat = self.model(x_anchor, x_seq, attention_mask)
         return y_hat.float().squeeze()
 
     def training_step(self, batch, batch_idx):
-        x, attention_mask, y = batch
-        y_hat = self.forward(x, attention_mask)
+        x_anchor, x_seq, attention_mask, y = batch
+        y_hat = self.forward(x_anchor, x_seq, attention_mask)
         loss = nn.functional.binary_cross_entropy(y_hat, y.float())
         accuracy_value = self.accuracy(y_hat, y)
         self.log(
@@ -294,8 +304,8 @@ class LitModel(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, attention_mask, y = batch
-        y_hat = self.forward(x, attention_mask)
+        x_anchor, x_seq, attention_mask, y = batch
+        y_hat = self.forward(x_anchor, x_seq, attention_mask)
         loss = nn.functional.binary_cross_entropy(y_hat, y.float())
         accuracy_value = self.accuracy(y_hat, y)
         self.log(
@@ -319,27 +329,35 @@ class LitModel(L.LightningModule):
         }
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        x, attention_mask, y = batch
-        y_hat = self(x, attention_mask)
+        x_anchor, x_seq, attention_mask, y = batch
+        y_hat = self(x_anchor, x_seq, attention_mask)
 
         out_dir = self.logger.log_dir
         print(f"Logging to: {out_dir}")
-        imgs = x  # (B, IMG_PER_SEQ, 1, 28, 28)
 
-        batch_size = imgs.size(0)
+        batch_size = x_seq.size(0)
+        seq_len = x_seq.size(1)  # number of sequence images
 
-        fig, axes = plt.subplots(batch_size, 1, figsize=(12, 2 * batch_size))
-
-        if batch_size == 1:
-            axes = [axes]  # keep iterable
+        fig, axes = plt.subplots(
+            batch_size, 2, figsize=(12, 2 * batch_size), squeeze=False
+        )
 
         for i in range(batch_size):
-            seq_imgs = imgs[i]  # [seq_len, 1, 28, 28]
+            # Visualize anchor image in left column
+            anchor_img = x_anchor[i].cpu()  # [C, H, W] assumed 1 channel or 3 channels
+            axes[i, 0].imshow(
+                anchor_img.permute(1, 2, 0) * 0.5 + 0.5,
+                cmap="gray" if anchor_img.size(0) == 1 else None,
+            )
+            axes[i, 0].set_title("Anchor Image")
+            axes[i, 0].axis("off")
 
-            grid = torchvision.utils.make_grid(seq_imgs.cpu(), nrow=seq_imgs.size(0))
-            axes[i].imshow(grid.permute(1, 2, 0) * 0.5 + 0.5)
-            axes[i].set_title(f"Pred: {y_hat[i].item():.2f} | Label: {y[i].item()}")
-            axes[i].axis("off")
+            # Visualize sequence images in right column as a grid
+            seq_imgs = x_seq[i]  # [seq_len, C, H, W]
+            grid = torchvision.utils.make_grid(seq_imgs.cpu(), nrow=seq_len, padding=2)
+            axes[i, 1].imshow(grid.permute(1, 2, 0) * 0.5 + 0.5)
+            axes[i, 1].set_title(f"Pred: {y_hat[i].item():.2f} | Label: {y[i].item()}")
+            axes[i, 1].axis("off")
 
         plt.tight_layout()
         plt.savefig(osp.join(out_dir, f"predictions_{batch_idx}.png"))
