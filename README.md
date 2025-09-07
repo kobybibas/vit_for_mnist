@@ -50,7 +50,6 @@ Self attention:
 - [x] Sequence of varying length (1-10)
 - [x] Add output transformation for output to be between -1 and 1: (y_hat + 0.5) * y_max
 - [x] Compare to traditional model (CNN + fc)
-- [ ] Histogram of error residual 
 
 Cross attention:
 - [ ] Baseline
