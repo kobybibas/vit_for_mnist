@@ -34,7 +34,7 @@ class Net(nn.Module):
         self.conv1 = nn.Conv2d(1, 6, 5)
         self.pool = nn.MaxPool2d(2, 2)
         self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(256, 10) 
+        self.fc1 = nn.Linear(256, 10)
 
     def forward(self, x):
         x = self.pool(F.relu(self.conv1(x)))
@@ -45,7 +45,6 @@ class Net(nn.Module):
 
 class EpochMetricsCallback(L.Callback):
     def on_validation_epoch_end(self, trainer, pl_module):
-        
         # Train
         train_mean, train_acc = -1, -1
         if len(pl_module.training_step_outputs) > 0:
@@ -70,9 +69,7 @@ class EpochMetricsCallback(L.Callback):
         pl_module.validation_step_outputs.clear()
 
 
-
 class LitModel(L.LightningModule):
-    
     def __init__(self, model):
         super().__init__()
         self.model = model
@@ -109,13 +106,17 @@ class LitModel(L.LightningModule):
 def main():
     # Dataset
     train_set, val_set = data_preparation()
-    train_loader = DataLoader(train_set, batch_size=32, shuffle=True, num_workers=9, persistent_workers=True)
-    val_loader = DataLoader(val_set, batch_size=32, shuffle=False, num_workers=9, persistent_workers=True)
+    train_loader = DataLoader(
+        train_set, batch_size=32, shuffle=True, num_workers=9, persistent_workers=True
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=32, shuffle=False, num_workers=9, persistent_workers=True
+    )
 
     # Initiate model
     model = Net()
     lit_model = LitModel(model=model)
-    
+
     # Train
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     trainer = L.Trainer(

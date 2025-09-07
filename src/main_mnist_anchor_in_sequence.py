@@ -14,9 +14,9 @@ from matplotlib import pyplot as plt
 from torch import nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
+from torchmetrics import Accuracy
 from torchvision.datasets import MNIST
 from torchvision.datasets.mnist import _Image_fromarray
-from torchmetrics import Accuracy
 
 DEBUG = False
 MIN_IMG_PER_SEQ = 1
@@ -94,7 +94,12 @@ def pad_sequences(batch):
         padded_seqs.append(padded)
         attention_masks.append(mask)
 
-    return anchors, torch.stack(padded_seqs), torch.stack(attention_masks), torch.tensor(labels)
+    return (
+        anchors,
+        torch.stack(padded_seqs),
+        torch.stack(attention_masks),
+        torch.tensor(labels),
+    )
 
 
 def data_preparation():
@@ -143,7 +148,7 @@ class TransformerModel(nn.Module):
         super().__init__()
         self.embed_dim = 128
         self.encoder = ImageEncoder(self.embed_dim)
-        self.self_attention = nn.TransformerEncoder( # TODO: convert to cross attention
+        self.self_attention = nn.TransformerEncoder(  # TODO: convert to cross attention
             nn.TransformerEncoderLayer(
                 self.embed_dim, nhead=4, dropout=0.0, batch_first=True
             ),
@@ -164,7 +169,7 @@ class TransformerModel(nn.Module):
         if DEBUG:
             print(f"2. {x.shape=}")
         z = self.encoder(x)
-        
+
         if DEBUG:
             print(f"3. {z.shape=}")
         z = z.view(batch, seq, self.embed_dim)
@@ -345,7 +350,7 @@ class LitModel(L.LightningModule):
 
 def main():
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = now + "_" + MODEL_TYPE
+    run_name = "mnist_anchor_in_seq_" + now + "_" + MODEL_TYPE
     run_name = run_name + "_DEBUG" if DEBUG else run_name
     logger = CSVLogger("logs", name=run_name)
 

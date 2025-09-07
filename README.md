@@ -1,11 +1,11 @@
 # Vision Transformer (ViT) for MNIST Sequences
-This project investigates the use of **Vision Transformers (ViTs)** for sequence-based tasks on the MNIST dataset. 
+This project investigates the use of Vision Transformers (ViTs) for sequence-based tasks on the MNIST dataset. 
 The repository implements and compares Transformer-based models with classical architectures, evaluating tasks beyond single-digit classification.
 
 ## Features
-1. **Simple CNN baseline** for MNIST digit classification
-2. **Self-attention regression**: Predicting the sum of a sequence of MNIST images
-3. [TODO] **Cross-attention detection**: Determining if an anchor image exists in a given sequence
+1. MNIST digit classification using a simple CNN baseline
+2. Self-attention regression for Predicting the sum of a sequence of MNIST images
+3. [TODO] Cross-attention detection to determine if an anchor image exists in a given sequence
 
 
 ## Problem Definition
@@ -22,7 +22,7 @@ The project benchmarks a Transformer-based architecture against fully connected 
 ## Results
 Two key metrics are evaluated:
 1. MSE Loss
-2. Accuracy: Rounded prediction matches ground truth
+2. Accuracy (correct if the rounded prediction matches ground truth)
 
 | Model | Validation Loss | Validation Accuracy |
 | :-- | :-- | :-- |

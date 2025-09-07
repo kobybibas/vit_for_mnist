@@ -58,7 +58,11 @@ def pad_sequences(batch):
     sequences, labels = zip(*batch)
 
     # Fully connected model only supports a fix size input
-    max_len = max(len(seq) for seq in sequences) if MODEL_TYPE == "transformer" else MAX_IMG_PER_SEQ
+    max_len = (
+        max(len(seq) for seq in sequences)
+        if MODEL_TYPE == "transformer"
+        else MAX_IMG_PER_SEQ
+    )
 
     padded_seqs = []
     attention_masks = []
@@ -83,7 +87,7 @@ def pad_sequences(batch):
 
         padded_seqs.append(padded)
         attention_masks.append(mask)
-    
+
     return torch.stack(padded_seqs), torch.stack(attention_masks), torch.tensor(labels)
 
 
@@ -339,7 +343,7 @@ class LitModel(L.LightningModule):
 
 def main():
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = now + "_" + MODEL_TYPE
+    run_name = 'mnist_sum' + now + "_" + MODEL_TYPE
     run_name = run_name + "_DEBUG" if DEBUG else run_name
     logger = CSVLogger("logs", name=run_name)
 
