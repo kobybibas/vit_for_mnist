@@ -26,17 +26,16 @@ Two key metrics are evaluated:
 
 | Model | Validation Loss | Validation Accuracy |
 | :-- | :-- | :-- |
-| Fully Connected | *TBD* | *TBD* |
-| Transformer | **1.17** | **0.64** |
+| Fully Connected | 1.69 | 0.27 |
+| Transformer | **1.18** | **0.66** |
 
 ## Visualizations
 
 Example images from a sequence:
 ![Example images from a sequence](https://github.com/kobybibas/vit_for_mnist/blob/main/figures/transformer__predictions_0.png?raw=true)
 
-Loss versus training epochs:
-![Fully connected accuracy](https://github.com/kobybibas/vit_for_mnist/blob/main/figures/fully_connected__accuracy_over_epochs.png?raw=true)
-
+Transformer accuracy over training epochs:
+![Transformer accuracy](https://github.com/kobybibas/vit_for_mnist/blob/main/figures/transformer__accuracy_over_epochs.png?raw=true)
 
 Fully connected accuracy over training epochs:
 ![Fully connected accuracy](https://github.com/kobybibas/vit_for_mnist/blob/main/figures/fully_connected__accuracy_over_epochs.png?raw=true)
