@@ -21,15 +21,11 @@ NUM_WORKERS = 9
 MAX_EPOCHS = 50
 LR_STEPS = [30, 40]
 
-MODEL_TYPE = 'Transformer' # 'Transformer' or 'FC'
-
-# Transform the model output to [0, 90]
-OUTPUT_NORMALIZATION = True
+MODEL_TYPE = "transformer"  # 'transformer' or 'fc'
 
 
 class MNISTSequence(MNIST):
-
-    def get_sequence_length(self,index):
+    def get_sequence_length(self, index):
         # Deterministically set the sequence length
         return binascii.crc32(str(index).encode()) % MAX_IMG_PER_SEQ + 1
 
@@ -55,12 +51,14 @@ class MNISTSequence(MNIST):
         return img_seq, target
 
     def __len__(self) -> int:
-        return len(self.data) - (MAX_IMG_PER_SEQ - 1)
+        return len(self.data) - MAX_IMG_PER_SEQ
 
 
 def pad_sequences(batch):
     sequences, labels = zip(*batch)
-    max_len = max(len(seq) for seq in sequences)
+
+    # Fully connected model only supports a fix size input
+    max_len = max(len(seq) for seq in sequences) if MODEL_TYPE == "transformer" else MAX_IMG_PER_SEQ
 
     padded_seqs = []
     attention_masks = []
@@ -85,7 +83,7 @@ def pad_sequences(batch):
 
         padded_seqs.append(padded)
         attention_masks.append(mask)
-
+    
     return torch.stack(padded_seqs), torch.stack(attention_masks), torch.tensor(labels)
 
 
@@ -165,9 +163,7 @@ class TransformerModel(nn.Module):
         if DEBUG:
             print(f"5. {z.shape=}, {attention_mask.shape=} {attention_mask=}")
 
-        # TODO: should we remove masked encoded? 
-        masked_encoded = z * attention_mask.unsqueeze(-1)
-        z = masked_encoded.sum(dim=1) / attention_mask.sum(dim=1, keepdim=True)
+        z = z.mean(dim=1)
         if DEBUG:
             print(f"6. {z.shape=}")
         z = F.relu(self.fc1(z))
@@ -177,23 +173,22 @@ class TransformerModel(nn.Module):
         if DEBUG:
             print(f"8. {z.shape=}")
 
-        if OUTPUT_NORMALIZATION:
-            # Equivalent to [(y/90)-0.5]
-            z = (z + 0.5) * 90
-        else:
-            z = F.relu(z)
+        # Equivalent to [(y/90)-0.5]
+        z = (z + 0.5) * 90
         return z
+
 
 class FullyConnectedModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.embed_dim = 128
         self.encoder = ImageEncoder(self.embed_dim)
-        self.fc1 = nn.Linear(128*MAX_IMG_PER_SEQ, 128)
+        self.fc1 = nn.Linear(128 * MAX_IMG_PER_SEQ, 128)
         self.fc2 = nn.Linear(128, 64)
         self.fc3 = nn.Linear(64, 1)
 
-    def forward(self, x):
+    def forward(self, x, attention_mask):
+        # attention_mask is not used, it is to be compatible with Transformer inputs
         # Reshape to have a virtual larger batch, (B * IMG_PER_SEQ, C, H, W)
         batch, seq, channel, height, width = x.shape
         if DEBUG:
@@ -205,17 +200,18 @@ class FullyConnectedModel(nn.Module):
         if DEBUG:
             print(f"3. {z.shape=}")
         z = z.view(batch, seq, self.embed_dim)
-        x = x.view(x.size(0), -1)  # Flatten the input
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        if DEBUG:
+            print(f"4. {z.shape=}")
+        z = z.view(batch, -1)  # Flatten the input
+        if DEBUG:
+            print(f"5. {z.shape=}")
+        z = F.relu(self.fc1(z))
+        z = F.relu(self.fc2(z))
+        z = self.fc3(z)
 
-        if OUTPUT_NORMALIZATION:
-            # Equivalent to [(y/90)-0.5]
-            x = (x + 0.5) * 90
-        else:
-            x = F.relu(x)
-        return x
+        # Equivalent to [(y/90)-0.5]
+        z = (z + 0.5) * 90
+        return z
 
 
 class EpochMetricsCallback(L.Callback):
@@ -343,10 +339,10 @@ class LitModel(L.LightningModule):
 
 def main():
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = now + '_' + MODEL_TYPE
-    run_name = run_name + '_DEBUG' if DEBUG else run_name
+    run_name = now + "_" + MODEL_TYPE
+    run_name = run_name + "_DEBUG" if DEBUG else run_name
     logger = CSVLogger("logs", name=run_name)
-    
+
     train_set, val_set = data_preparation()
     train_loader = DataLoader(
         train_set,
@@ -366,7 +362,7 @@ def main():
     )
 
     # Initiate model
-    model = TransformerModel()
+    model = TransformerModel() if MODEL_TYPE == "transformer" else FullyConnectedModel()
     lit_model = LitModel(model=model)
 
     # Train
@@ -470,12 +466,12 @@ def main():
     ax = axs[0]
     ax.hist(train_data["train_random_seq_length"], bins=bins, alpha=0.7, label="Train")
     ax.set_ylabel("Frequency")
-    
+
     ax = axs[1]
     ax.hist(val_data["val_random_seq_length"], bins=bins, alpha=0.7, label="Validation")
     ax.set_xlabel("Sequence Length")
     ax.set_ylabel("Frequency")
-    
+
     axs[0].set_title("Histogram of Sequence Lengths")
     plt.tight_layout()
     plt.savefig(osp.join(out_dir, "histogram_sequence_length.png"))
