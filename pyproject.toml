@@ -1,7 +1,7 @@
 [project]
 name = "vit-for-mnist"
 version = "0.1.0"
-description = "Add your description here"
+description = "Vision Transformer for MNIST"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

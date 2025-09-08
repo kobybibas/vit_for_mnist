@@ -41,6 +41,21 @@ Fully connected accuracy over training epochs:
 ![Fully connected accuracy](https://github.com/kobybibas/vit_for_mnist/blob/main/figures/fully_connected__accuracy_over_epochs.png?raw=true)
 
 
+# Running the Main Scripts
+
+This project uses the [uv](https://github.com/astral-sh/uv) package manager for Python. 
+Install requirements:
+```sh
+uv sync
+```
+
+Running training and evaluation
+```sh
+uv run src/main_mnist_classification.py
+uv run src/main_mnist_sum_prediction.py
+uv run src/main_mnist_anchor_in_sequence.py
+```
+
 # TODOs
 Self attention:
 - [x] Visualizations of the sequence, ground truth and prediction
@@ -51,6 +66,8 @@ Self attention:
 - [x] Compare to traditional model (CNN + fc)
 
 Cross attention:
-- [ ] Baseline
-- [ ] Sequence of varying length 
+- [X] Baseline
+- [X] Sequence of varying length 
 - [ ] Compare to traditional model (CNN + fc)
+  - [ ] Run transformer, optimize hyperparams
+  - [ ] Run FC with the same hyperparams

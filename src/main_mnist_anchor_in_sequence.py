@@ -1,3 +1,7 @@
+# =============================
+# Imports and Global Constants
+# =============================
+
 import binascii
 import os.path as osp
 from datetime import datetime
@@ -16,16 +20,28 @@ from torchmetrics import Accuracy
 from torchvision.datasets import MNIST
 from torchvision.datasets.mnist import _Image_fromarray
 
+# Debug and training parameters
 DEBUG = False
 MAX_IMG_PER_SEQ = 10
 NUM_WORKERS = 9
 MAX_EPOCHS = 50
 LR_STEPS = [30, 40]
+LR = 1e-3
+MODEL_TYPE = "transformer"
+assert MODEL_TYPE in ["transformer", "fc"]
 
-MODEL_TYPE = "transformer"  # 'transformer' or 'fc'
+
+# =============================
+# Dataset and Data Preparation
+# =============================
 
 
 class MNISTSequence(MNIST):
+    """
+    Custom MNIST dataset that returns a sequence of images and an anchor image.
+    The label is True if the anchor digit appears in the sequence.
+    """
+
     def get_sequence_length(self, index):
         # Deterministically set the sequence length
         return binascii.crc32(str(index).encode()) % MAX_IMG_PER_SEQ + 1
@@ -38,10 +54,8 @@ class MNISTSequence(MNIST):
         img_seq = []
         for img in imgs:
             img = _Image_fromarray(img.numpy(), mode="L")
-
             if self.transform is not None:
                 img = self.transform(img)
-
             img_seq.append(img)
 
         img_seq = torch.stack(img_seq, dim=0)  # (IMG_PER_SEQ, 1, 28, 28)
@@ -51,7 +65,7 @@ class MNISTSequence(MNIST):
                 targets[i] = self.target_transform(targets[i])
 
         img_anchor = img_seq[0]  # (1, 28, 28)
-        img_seq = img_seq[1:]  # (IMG_PER_SEQ , 1, 28, 28)
+        img_seq = img_seq[1:]  # (IMG_PER_SEQ, 1, 28, 28)
 
         target_anchor = targets[0]
         target_seq = targets[1:]
@@ -63,18 +77,18 @@ class MNISTSequence(MNIST):
 
 
 def pad_sequences(batch):
+    """
+    Pads sequences in a batch to the same length and creates attention masks.
+    Returns anchors, padded sequences, attention masks, and labels as tensors.
+    """
     anchors, sequences, labels = zip(*batch)
-
-    # Fully connected model only supports a fix size input
     max_len = (
         max(len(seq) for seq in sequences)
         if MODEL_TYPE == "transformer"
         else MAX_IMG_PER_SEQ
     )
-
     padded_seqs = []
     attention_masks = []
-
     pad_value = 0
     for seq in sequences:
         padded = F.pad(
@@ -92,10 +106,8 @@ def pad_sequences(batch):
         )
         mask = torch.ones(len(seq), dtype=torch.bool)
         mask = F.pad(mask, (0, max_len - len(seq)), value=False)
-
         padded_seqs.append(padded)
         attention_masks.append(mask)
-
     return (
         torch.stack(anchors),
         torch.stack(padded_seqs),
@@ -105,6 +117,9 @@ def pad_sequences(batch):
 
 
 def data_preparation():
+    """
+    Prepares and returns the training and validation datasets with transforms.
+    """
     train_transform = torchvision.transforms.Compose(
         [
             torchvision.transforms.RandomHorizontalFlip(),
@@ -128,7 +143,16 @@ def data_preparation():
     return train_set, val_set
 
 
+# =============================
+# Model Definitions
+# =============================
+
+
 class ImageEncoder(nn.Module):
+    """
+    Simple CNN encoder for MNIST images.
+    """
+
     def __init__(self, output_embed_dim):
         super().__init__()
         self.conv1 = nn.Conv2d(1, 6, 5)
@@ -146,6 +170,10 @@ class ImageEncoder(nn.Module):
 
 
 class TransformerModel(nn.Module):
+    """
+    Transformer-based model for sequence classification.
+    """
+
     def __init__(self):
         super().__init__()
         self.embed_dim = 128
@@ -153,7 +181,6 @@ class TransformerModel(nn.Module):
         self.cross_attention = nn.MultiheadAttention(
             self.embed_dim, num_heads=4, batch_first=True
         )
-
         self.fc1 = nn.Linear(self.embed_dim, 64)
         self.fc2 = nn.Linear(64, 1)
 
@@ -163,8 +190,6 @@ class TransformerModel(nn.Module):
         z_anchor = self.encoder(x_anchor)
         if DEBUG:
             print(f"1. {z_anchor.shape=}")
-
-        # Reshape to have a virtual larger batch, (B * IMG_PER_SEQ, C, H, W) then reshape again to feed the transformer
         batch, seq, channel, height, width = x_seq.shape
         if DEBUG:
             print(f"1. {x_seq.shape=}")
@@ -172,34 +197,36 @@ class TransformerModel(nn.Module):
         if DEBUG:
             print(f"2. {x.shape=}")
         z = self.encoder(x)
-
         if DEBUG:
             print(f"3. {z.shape=}")
         z = z.view(batch, seq, self.embed_dim)
         if DEBUG:
             print(f"4. {z.shape=}")
-        y, _ = self.cross_attention(
-            z_anchor.unsqueeze(1),
-            z,
-            z,  # Query, Key, Value. We pad with 0 instead of src_key_padding_mask=~attention_mask assuming the model pick up that these are fake images
-        )
+        z, _ = self.cross_attention(
+            z_anchor.unsqueeze(1),  # Query
+            z,  # Key
+            z,  # Value
+        )  # We pad with 0 instead of src_key_padding_mask=~attention_mask assuming the model would pick up that these are fake images
         if DEBUG:
-            print(f"5. {y.shape=}")
-
-        y = y.mean(dim=1)
+            print(f"5. {z.shape=}")
+        z = z.mean(dim=1)
         if DEBUG:
-            print(f"6. {y.shape=}")
-        y = F.relu(self.fc1(y))
+            print(f"6. {z.shape=}")
+        z = F.relu(self.fc1(z))
         if DEBUG:
-            print(f"7. {y.shape=}")
-        y = self.fc2(y)
+            print(f"7. {z.shape=}")
+        z = self.fc2(z)
         if DEBUG:
-            print(f"8. {y.shape=}")
-        y = F.relu(y)
-        return y
+            print(f"8. {z.shape=}")
+        y_hat = F.sigmoid(z)
+        return y_hat, z
 
 
 class FullyConnectedModel(nn.Module):
+    """
+    Fully connected model for sequence classification (fixed input size).
+    """
+
     def __init__(self):
         super().__init__()
         self.embed_dim = 128
@@ -209,10 +236,8 @@ class FullyConnectedModel(nn.Module):
         self.fc3 = nn.Linear(64, 1)
 
     def forward(self, x_anchor, x_seq, attention_mask):
-        z_anchor = self.encoder(x_anchor)
-
         # attention_mask is not used, it is to be compatible with Transformer inputs
-        # Reshape to have a virtual larger batch, (B * IMG_PER_SEQ, C, H, W)
+        z_anchor = self.encoder(x_anchor)
         batch, seq, channel, height, width = x_seq.shape
         if DEBUG:
             print(f"1. {x_seq.shape=}")
@@ -225,7 +250,7 @@ class FullyConnectedModel(nn.Module):
         z = z.view(batch, seq, self.embed_dim)
         if DEBUG:
             print(f"4. {z.shape=}")
-        z = z.view(batch, -1)  # Flatten the input
+        z = z.view(batch, -1)
         if DEBUG:
             print(f"5. {z.shape=}")
         z = torch.cat((z_anchor, z), dim=1)
@@ -234,26 +259,30 @@ class FullyConnectedModel(nn.Module):
         z = F.relu(self.fc1(z))
         z = F.relu(self.fc2(z))
         z = self.fc3(z)
-        z = F.relu(z)
-        return z
+        y_hat = F.sigmoid(z)
+        return y_hat, z
+
+
+# =============================
+# Lightning Callbacks and Module
+# =============================
 
 
 class EpochMetricsCallback(L.Callback):
+    """
+    Callback to log and print metrics at the end of each validation epoch.
+    """
+
     def on_validation_epoch_end(self, trainer, pl_module):
-        # Train
         train_loss_mean, train_acc_mean = -1, -1
         if len(pl_module.training_step_loss_outputs) > 0:
             train_loss_mean = torch.stack(pl_module.training_step_loss_outputs).mean()
             train_acc_mean = torch.stack(
                 pl_module.training_step_accuracy_outputs
             ).mean()
-
-        # Val
         val_loss_mean = torch.stack(pl_module.validation_step_loss_outputs).mean()
         val_acc_mean = torch.stack(pl_module.validation_step_accuracy_outputs).mean()
-
         lr = trainer.optimizers[0].param_groups[0]["lr"]
-
         print(
             f"[Epoch {trainer.current_epoch}] Validation [Loss Acc]=[{val_loss_mean:.2f} {val_acc_mean:.2f}] Training [Loss Acc]=[{train_loss_mean:.2f} {train_acc_mean:.2f}] lr={lr:.2e}"
         )
@@ -267,6 +296,10 @@ class EpochMetricsCallback(L.Callback):
 
 
 class LitModel(L.LightningModule):
+    """
+    PyTorch Lightning module for training and evaluation.
+    """
+
     def __init__(self, model):
         super().__init__()
         self.save_hyperparameters()
@@ -276,6 +309,7 @@ class LitModel(L.LightningModule):
         self.validation_step_loss_outputs = []
         self.training_step_accuracy_outputs = []
         self.validation_step_accuracy_outputs = []
+        self.compute_loss = nn.BCEWithLogitsLoss()
 
     def get_random_seq_length(self, attention_mask):
         num_elements = len(attention_mask)
@@ -285,13 +319,13 @@ class LitModel(L.LightningModule):
         return random_seq_length
 
     def forward(self, x_anchor, x_seq, attention_mask):
-        y_hat = self.model(x_anchor, x_seq, attention_mask)
-        return y_hat.float().squeeze()
+        y_hat, logits = self.model(x_anchor, x_seq, attention_mask)
+        return y_hat.float().squeeze(), logits.float().squeeze()
 
     def training_step(self, batch, batch_idx):
         x_anchor, x_seq, attention_mask, y = batch
-        y_hat = self.forward(x_anchor, x_seq, attention_mask)
-        loss = nn.functional.binary_cross_entropy(y_hat, y.float())
+        y_hat, logits = self.forward(x_anchor, x_seq, attention_mask)
+        loss = self.compute_loss(logits, y.float())
         accuracy_value = self.accuracy(y_hat, y)
         self.log(
             "train_random_seq_length",
@@ -305,8 +339,8 @@ class LitModel(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x_anchor, x_seq, attention_mask, y = batch
-        y_hat = self.forward(x_anchor, x_seq, attention_mask)
-        loss = nn.functional.binary_cross_entropy(y_hat, y.float())
+        y_hat, logits = self.forward(x_anchor, x_seq, attention_mask)
+        loss = self.compute_loss(logits, y.float())
         accuracy_value = self.accuracy(y_hat, y)
         self.log(
             "val_random_seq_length",
@@ -319,7 +353,7 @@ class LitModel(L.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-5)
+        optimizer = optim.Adam(self.parameters(), lr=LR, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(
             optimizer, milestones=LR_STEPS, gamma=0.1
         )
@@ -330,45 +364,44 @@ class LitModel(L.LightningModule):
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         x_anchor, x_seq, attention_mask, y = batch
-        y_hat = self(x_anchor, x_seq, attention_mask)
-
+        y_hat, logits = self(x_anchor, x_seq, attention_mask)
         out_dir = self.logger.log_dir
         print(f"Logging to: {out_dir}")
-
         batch_size = x_seq.size(0)
-        seq_len = x_seq.size(1)  # number of sequence images
-
+        seq_len = x_seq.size(1)
         fig, axes = plt.subplots(
             batch_size, 2, figsize=(12, 2 * batch_size), squeeze=False
         )
-
         for i in range(batch_size):
-            # Visualize anchor image in left column
-            anchor_img = x_anchor[i].cpu()  # [C, H, W] assumed 1 channel or 3 channels
+            anchor_img = x_anchor[i].cpu()
             axes[i, 0].imshow(
                 anchor_img.permute(1, 2, 0) * 0.5 + 0.5,
                 cmap="gray" if anchor_img.size(0) == 1 else None,
             )
             axes[i, 0].set_title("Anchor Image")
             axes[i, 0].axis("off")
-
-            # Visualize sequence images in right column as a grid
-            seq_imgs = x_seq[i]  # [seq_len, C, H, W]
+            seq_imgs = x_seq[i]
             grid = torchvision.utils.make_grid(seq_imgs.cpu(), nrow=seq_len, padding=2)
             axes[i, 1].imshow(grid.permute(1, 2, 0) * 0.5 + 0.5)
             axes[i, 1].set_title(f"Pred: {y_hat[i].item():.2f} | Label: {y[i].item()}")
             axes[i, 1].axis("off")
-
         plt.tight_layout()
         plt.savefig(osp.join(out_dir, f"predictions_{batch_idx}.png"))
         plt.close(fig)
-
         return y_hat
 
 
+# =============================
+# Main Training and Evaluation
+# =============================
+
+
 def main():
+    """
+    Main function to train, evaluate, and visualize the model and metrics.
+    """
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = "mnist_anchor_in_seq_" + now + "_" + MODEL_TYPE
+    run_name = f"mnist_anchor_in_seq_{now}_{MODEL_TYPE}"
     run_name = run_name + "_DEBUG" if DEBUG else run_name
     logger = CSVLogger("logs", name=run_name)
 
@@ -390,7 +423,7 @@ def main():
         collate_fn=pad_sequences,
     )
 
-    # Initiate model
+    # Initialize model
     model = TransformerModel() if MODEL_TYPE == "transformer" else FullyConnectedModel()
     lit_model = LitModel(model=model)
 
@@ -401,11 +434,9 @@ def main():
         accelerator=device,
         callbacks=[EpochMetricsCallback()],
         logger=logger,
-        # Fast dev mode
         limit_train_batches=100 if DEBUG else None,
         limit_val_batches=10 if DEBUG else None,
         limit_test_batches=10 if DEBUG else None,
-        # Visualize a single batch
         limit_predict_batches=1,
     )
 
@@ -419,13 +450,11 @@ def main():
     print("Predicting model...")
     trainer.predict(lit_model, dataloaders=val_loader)
 
-    # ----------------------------- #
-    # Visualize metrics over epochs #
-    # ----------------------------- #
+    # Visualize metrics over epochs
     out_dir = logger.log_dir
     log_df = pd.read_csv(osp.join(out_dir, "metrics.csv"))
 
-    # Plot training loss (skip NaN values)
+    # Plot training and validation loss
     train_data = log_df.dropna(subset=["train_loss"])
     val_data = log_df.dropna(subset=["val_loss"])
     fig, ax = plt.subplots(1, 1, figsize=(10, 6))
@@ -436,8 +465,6 @@ def main():
             label="Training Loss",
             marker="o",
         )
-
-    # Plot validation loss (skip NaN values)
     if len(val_data) > 0:
         ax.plot(
             val_data["epoch"], val_data["val_loss"], label="Validation Loss", marker="s"
@@ -453,12 +480,10 @@ def main():
     plt.savefig(osp.join(out_dir, "loss_over_epochs.png"))
     plt.close(fig)
 
-    # Accuracy
+    # Plot training and validation accuracy
     train_data = log_df.dropna(subset=["train_accuracy"])
     val_data = log_df.dropna(subset=["val_accuracy"])
     fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-
-    # Plot training accuracy (skip NaN values)
     if len(train_data) > 0:
         ax.plot(
             train_data["epoch"],
@@ -466,8 +491,6 @@ def main():
             label="Training Accuracy",
             marker="o",
         )
-
-    # Plot validation accuracy (skip NaN values)
     if len(val_data) > 0:
         ax.plot(
             val_data["epoch"],
@@ -475,7 +498,6 @@ def main():
             label="Validation Accuracy",
             marker="s",
         )
-
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Accuracy")
     ax.set_title("Accuracy over Epochs")
@@ -495,12 +517,10 @@ def main():
     ax = axs[0]
     ax.hist(train_data["train_random_seq_length"], bins=bins, alpha=0.7, label="Train")
     ax.set_ylabel("Frequency")
-
     ax = axs[1]
     ax.hist(val_data["val_random_seq_length"], bins=bins, alpha=0.7, label="Validation")
     ax.set_xlabel("Sequence Length")
     ax.set_ylabel("Frequency")
-
     axs[0].set_title("Histogram of Sequence Lengths")
     plt.tight_layout()
     plt.savefig(osp.join(out_dir, "histogram_sequence_length.png"))
