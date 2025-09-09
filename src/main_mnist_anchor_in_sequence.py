@@ -27,7 +27,7 @@ NUM_WORKERS = 9
 MAX_EPOCHS = 50
 LR_STEPS = [30, 40]
 LR = 1e-3
-MODEL_TYPE = "transformer"
+MODEL_TYPE = "fc"
 assert MODEL_TYPE in ["transformer", "fc"]
 
 
