@@ -1,4 +1,4 @@
-# Vision Transformer (ViT) for MNIST Sequences
+# Vision Transformer for MNIST Sequences
 This project investigates the use of Vision Transformers (ViTs) for sequence-based tasks on the MNIST dataset. 
 The repository implements and compares Transformer-based models with classical architectures, evaluating tasks beyond single-digit classification.
 
